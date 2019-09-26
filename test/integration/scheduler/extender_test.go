@@ -49,7 +49,7 @@ type priorityFunc func(pod *v1.Pod, nodes *v1.NodeList) (*schedulerapi.HostPrior
 
 type priorityConfig struct {
 	function priorityFunc
-	weight   int
+	weight   int64
 }
 
 type Extender struct {
@@ -75,7 +75,6 @@ func (e *Extender) serveHTTP(t *testing.T, w http.ResponseWriter, req *http.Requ
 		}
 
 		if strings.Contains(req.URL.Path, filter) {
-			resp := &schedulerapi.ExtenderFilterResult{}
 			resp, err := e.Filter(&args)
 			if err != nil {
 				resp.Error = err.Error()
@@ -191,7 +190,7 @@ func (e *Extender) Filter(args *schedulerapi.ExtenderArgs) (*schedulerapi.Extend
 
 func (e *Extender) Prioritize(args *schedulerapi.ExtenderArgs) (*schedulerapi.HostPriorityList, error) {
 	result := schedulerapi.HostPriorityList{}
-	combinedScores := map[string]int{}
+	combinedScores := map[string]int64{}
 	var nodes = &v1.NodeList{Items: []v1.Node{}}
 
 	if e.nodeCacheCapable {
@@ -257,7 +256,7 @@ func machine2Prioritizer(pod *v1.Pod, nodes *v1.NodeList) (*schedulerapi.HostPri
 		}
 		result = append(result, schedulerapi.HostPriority{
 			Host:  node.Name,
-			Score: score,
+			Score: int64(score),
 		})
 	}
 	return &result, nil
@@ -272,7 +271,7 @@ func machine3Prioritizer(pod *v1.Pod, nodes *v1.NodeList) (*schedulerapi.HostPri
 		}
 		result = append(result, schedulerapi.HostPriority{
 			Host:  node.Name,
-			Score: score,
+			Score: int64(score),
 		})
 	}
 	return &result, nil

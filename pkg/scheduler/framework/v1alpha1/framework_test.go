@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -24,13 +25,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
+	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 )
 
 const (
-	scoreWithNormalizePlugin1  = "score-with-normalize-plugin-1"
-	scoreWithNormalizePlugin2  = "score-with-normalize-plugin-2"
-	scorePlugin1               = "score-plugin-1"
-	pluginNotImplementingScore = "plugin-not-implementing-score"
+	scoreWithNormalizePlugin1      = "score-with-normalize-plugin-1"
+	scoreWithNormalizePlugin2      = "score-with-normalize-plugin-2"
+	scorePlugin1                   = "score-plugin-1"
+	pluginNotImplementingScore     = "plugin-not-implementing-score"
+	preFilterPluginName            = "prefilter-plugin"
+	preFilterWithUpdaterPluginName = "prefilter-with-updater-plugin"
 )
 
 // TestScoreWithNormalizePlugin implements ScoreWithNormalizePlugin interface.
@@ -38,17 +42,32 @@ const (
 var _ = ScoreWithNormalizePlugin(&TestScoreWithNormalizePlugin{})
 var _ = ScorePlugin(&TestScorePlugin{})
 
-func newScoreWithNormalizePlugin1(inj injectedResult) Plugin {
-	return &TestScoreWithNormalizePlugin{scoreWithNormalizePlugin1, inj}
+func newScoreWithNormalizePlugin1(injArgs *runtime.Unknown, f FrameworkHandle) (Plugin, error) {
+	var inj injectedResult
+	if err := DecodeInto(injArgs, &inj); err != nil {
+		return nil, err
+	}
+	return &TestScoreWithNormalizePlugin{scoreWithNormalizePlugin1, inj}, nil
 }
-func newScoreWithNormalizePlugin2(inj injectedResult) Plugin {
-	return &TestScoreWithNormalizePlugin{scoreWithNormalizePlugin2, inj}
+
+func newScoreWithNormalizePlugin2(injArgs *runtime.Unknown, f FrameworkHandle) (Plugin, error) {
+	var inj injectedResult
+	if err := DecodeInto(injArgs, &inj); err != nil {
+		return nil, err
+	}
+	return &TestScoreWithNormalizePlugin{scoreWithNormalizePlugin2, inj}, nil
 }
-func newScorePlugin1(inj injectedResult) Plugin {
-	return &TestScorePlugin{scorePlugin1, inj}
+
+func newScorePlugin1(injArgs *runtime.Unknown, f FrameworkHandle) (Plugin, error) {
+	var inj injectedResult
+	if err := DecodeInto(injArgs, &inj); err != nil {
+		return nil, err
+	}
+	return &TestScorePlugin{scorePlugin1, inj}, nil
 }
-func newPluginNotImplementingScore(injectedResult) Plugin {
-	return &PluginNotImplementingScore{}
+
+func newPluginNotImplementingScore(_ *runtime.Unknown, _ FrameworkHandle) (Plugin, error) {
+	return &PluginNotImplementingScore{}, nil
 }
 
 type TestScoreWithNormalizePlugin struct {
@@ -89,12 +108,64 @@ func (pl *PluginNotImplementingScore) Name() string {
 	return pluginNotImplementingScore
 }
 
-var defaultConstructors = map[string]func(injectedResult) Plugin{
-	scoreWithNormalizePlugin1:  newScoreWithNormalizePlugin1,
-	scoreWithNormalizePlugin2:  newScoreWithNormalizePlugin2,
-	scorePlugin1:               newScorePlugin1,
-	pluginNotImplementingScore: newPluginNotImplementingScore,
+// TestPreFilterPlugin only implements PreFilterPlugin interface.
+type TestPreFilterPlugin struct {
+	PreFilterCalled int
 }
+
+func (pl *TestPreFilterPlugin) Name() string {
+	return preFilterPluginName
+}
+
+func (pl *TestPreFilterPlugin) PreFilter(pc *PluginContext, p *v1.Pod) *Status {
+	pl.PreFilterCalled++
+	return nil
+}
+
+func (pl *TestPreFilterPlugin) Updater() Updater {
+	return nil
+}
+
+// TestPreFilterWithUpdatePlugin implements Add/Remove interfaces.
+type TestPreFilterWithUpdaterPlugin struct {
+	PreFilterCalled int
+	AddCalled       int
+	RemoveCalled    int
+}
+
+func (pl *TestPreFilterWithUpdaterPlugin) Name() string {
+	return preFilterWithUpdaterPluginName
+}
+
+func (pl *TestPreFilterWithUpdaterPlugin) PreFilter(pc *PluginContext, p *v1.Pod) *Status {
+	pl.PreFilterCalled++
+	return nil
+}
+
+func (pl *TestPreFilterWithUpdaterPlugin) AddPod(pc *PluginContext, podToSchedule *v1.Pod,
+	podToAdd *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *Status {
+	pl.AddCalled++
+	return nil
+}
+
+func (pl *TestPreFilterWithUpdaterPlugin) RemovePod(pc *PluginContext, podToSchedule *v1.Pod,
+	podToRemove *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *Status {
+	pl.RemoveCalled++
+	return nil
+}
+
+func (pl *TestPreFilterWithUpdaterPlugin) Updater() Updater {
+	return pl
+}
+
+var registry Registry = func() Registry {
+	r := make(Registry)
+	r.Register(scoreWithNormalizePlugin1, newScoreWithNormalizePlugin1)
+	r.Register(scoreWithNormalizePlugin2, newScoreWithNormalizePlugin2)
+	r.Register(scorePlugin1, newScorePlugin1)
+	r.Register(pluginNotImplementingScore, newPluginNotImplementingScore)
+	return r
+}()
 
 var defaultWeights = map[string]int32{
 	scoreWithNormalizePlugin1: 1,
@@ -102,8 +173,7 @@ var defaultWeights = map[string]int32{
 	scorePlugin1:              1,
 }
 
-// No specific config required.
-var args []config.PluginConfig
+var emptyArgs []config.PluginConfig = make([]config.PluginConfig, 0)
 var pc = &PluginContext{}
 
 // Pod is only used for logging errors.
@@ -150,7 +220,7 @@ func TestInitFrameworkWithScorePlugins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewFramework(toRegistry(defaultConstructors, make(map[string]injectedResult)), tt.plugins, args)
+			_, err := NewFramework(registry, tt.plugins, emptyArgs)
 			if tt.initErr && err == nil {
 				t.Fatal("Framework initialization should fail")
 			}
@@ -163,11 +233,11 @@ func TestInitFrameworkWithScorePlugins(t *testing.T) {
 
 func TestRunScorePlugins(t *testing.T) {
 	tests := []struct {
-		name        string
-		registry    Registry
-		plugins     *config.Plugins
-		injectedRes map[string]injectedResult
-		want        PluginToNodeScores
+		name          string
+		registry      Registry
+		plugins       *config.Plugins
+		pluginConfigs []config.PluginConfig
+		want          PluginToNodeScores
 		// If err is true, we expect RunScorePlugin to fail.
 		err bool
 	}{
@@ -179,8 +249,13 @@ func TestRunScorePlugins(t *testing.T) {
 		{
 			name:    "single Score plugin",
 			plugins: buildConfigDefaultWeights(scorePlugin1),
-			injectedRes: map[string]injectedResult{
-				scorePlugin1: {scoreRes: 1},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scorePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "scoreRes": 1 }`),
+					},
+				},
 			},
 			// scorePlugin1 Score returns 1, weight=1, so want=1.
 			want: PluginToNodeScores{
@@ -191,8 +266,13 @@ func TestRunScorePlugins(t *testing.T) {
 			name: "single ScoreWithNormalize plugin",
 			//registry: registry,
 			plugins: buildConfigDefaultWeights(scoreWithNormalizePlugin1),
-			injectedRes: map[string]injectedResult{
-				scoreWithNormalizePlugin1: {scoreRes: 10, normalizeRes: 5},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scoreWithNormalizePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "scoreRes": 10, "normalizeRes": 5 }`),
+					},
+				},
 			},
 			// scoreWithNormalizePlugin1 Score returns 10, but NormalizeScore overrides to 5, weight=1, so want=5
 			want: PluginToNodeScores{
@@ -202,10 +282,25 @@ func TestRunScorePlugins(t *testing.T) {
 		{
 			name:    "2 Score plugins, 2 NormalizeScore plugins",
 			plugins: buildConfigDefaultWeights(scorePlugin1, scoreWithNormalizePlugin1, scoreWithNormalizePlugin2),
-			injectedRes: map[string]injectedResult{
-				scorePlugin1:              {scoreRes: 1},
-				scoreWithNormalizePlugin1: {scoreRes: 3, normalizeRes: 4},
-				scoreWithNormalizePlugin2: {scoreRes: 4, normalizeRes: 5},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scorePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "scoreRes": 1 }`),
+					},
+				},
+				{
+					Name: scoreWithNormalizePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "scoreRes": 3, "normalizeRes": 4}`),
+					},
+				},
+				{
+					Name: scoreWithNormalizePlugin2,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "scoreRes": 4, "normalizeRes": 5}`),
+					},
+				},
 			},
 			// scorePlugin1 Score returns 1, weight =1, so want=1.
 			// scoreWithNormalizePlugin1 Score returns 3, but NormalizeScore overrides to 4, weight=1, so want=4.
@@ -218,16 +313,26 @@ func TestRunScorePlugins(t *testing.T) {
 		},
 		{
 			name: "score fails",
-			injectedRes: map[string]injectedResult{
-				scoreWithNormalizePlugin1: {scoreErr: true},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scoreWithNormalizePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "scoreErr": true }`),
+					},
+				},
 			},
 			plugins: buildConfigDefaultWeights(scorePlugin1, scoreWithNormalizePlugin1),
 			err:     true,
 		},
 		{
 			name: "normalize fails",
-			injectedRes: map[string]injectedResult{
-				scoreWithNormalizePlugin1: {normalizeErr: true},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scoreWithNormalizePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(`{ "normalizeErr": true }`),
+					},
+				},
 			},
 			plugins: buildConfigDefaultWeights(scorePlugin1, scoreWithNormalizePlugin1),
 			err:     true,
@@ -235,32 +340,52 @@ func TestRunScorePlugins(t *testing.T) {
 		{
 			name:    "Score plugin return score greater than MaxNodeScore",
 			plugins: buildConfigDefaultWeights(scorePlugin1),
-			injectedRes: map[string]injectedResult{
-				scorePlugin1: {scoreRes: MaxNodeScore + 1},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scorePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(fmt.Sprintf(`{ "scoreRes": %d }`, MaxNodeScore+1)),
+					},
+				},
 			},
 			err: true,
 		},
 		{
 			name:    "Score plugin return score less than MinNodeScore",
 			plugins: buildConfigDefaultWeights(scorePlugin1),
-			injectedRes: map[string]injectedResult{
-				scorePlugin1: {scoreRes: MinNodeScore - 1},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scorePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(fmt.Sprintf(`{ "scoreRes": %d }`, MinNodeScore-1)),
+					},
+				},
 			},
 			err: true,
 		},
 		{
 			name:    "ScoreWithNormalize plugin return score greater than MaxNodeScore",
 			plugins: buildConfigDefaultWeights(scoreWithNormalizePlugin1),
-			injectedRes: map[string]injectedResult{
-				scoreWithNormalizePlugin1: {normalizeRes: MaxNodeScore + 1},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scoreWithNormalizePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(fmt.Sprintf(`{ "normalizeRes": %d }`, MaxNodeScore+1)),
+					},
+				},
 			},
 			err: true,
 		},
 		{
 			name:    "ScoreWithNormalize plugin return score less than MinNodeScore",
 			plugins: buildConfigDefaultWeights(scoreWithNormalizePlugin1),
-			injectedRes: map[string]injectedResult{
-				scoreWithNormalizePlugin1: {normalizeRes: MinNodeScore - 1},
+			pluginConfigs: []config.PluginConfig{
+				{
+					Name: scoreWithNormalizePlugin1,
+					Args: runtime.Unknown{
+						Raw: []byte(fmt.Sprintf(`{ "normalizeRes": %d }`, MinNodeScore-1)),
+					},
+				},
 			},
 			err: true,
 		},
@@ -268,9 +393,8 @@ func TestRunScorePlugins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Inject the results for each plugin.
-			registry := toRegistry(defaultConstructors, tt.injectedRes)
-			f, err := NewFramework(registry, tt.plugins, args)
+			// Inject the results via Args in PluginConfig.
+			f, err := NewFramework(registry, tt.plugins, tt.pluginConfigs)
 			if err != nil {
 				t.Fatalf("Failed to create framework for testing: %v", err)
 			}
@@ -294,16 +418,42 @@ func TestRunScorePlugins(t *testing.T) {
 	}
 }
 
-func toRegistry(constructors map[string]func(injectedResult) Plugin, injectedRes map[string]injectedResult) Registry {
-	registry := make(Registry)
-	for pl, f := range constructors {
-		npl := pl
-		nf := f
-		registry[pl] = func(_ *runtime.Unknown, _ FrameworkHandle) (Plugin, error) {
-			return nf(injectedRes[npl]), nil
+func TestPreFilterPlugins(t *testing.T) {
+	preFilter1 := &TestPreFilterPlugin{}
+	preFilter2 := &TestPreFilterWithUpdaterPlugin{}
+	r := make(Registry)
+	r.Register(preFilterPluginName,
+		func(_ *runtime.Unknown, fh FrameworkHandle) (Plugin, error) {
+			return preFilter1, nil
+		})
+	r.Register(preFilterWithUpdaterPluginName,
+		func(_ *runtime.Unknown, fh FrameworkHandle) (Plugin, error) {
+			return preFilter2, nil
+		})
+	plugins := &config.Plugins{PreFilter: &config.PluginSet{Enabled: []config.Plugin{{Name: preFilterWithUpdaterPluginName}, {Name: preFilterPluginName}}}}
+	t.Run("TestPreFilterPlugin", func(t *testing.T) {
+		f, err := NewFramework(r, plugins, emptyArgs)
+		if err != nil {
+			t.Fatalf("Failed to create framework for testing: %v", err)
 		}
-	}
-	return registry
+		f.RunPreFilterPlugins(nil, nil)
+		f.RunPreFilterUpdaterAddPod(nil, nil, nil, nil)
+		f.RunPreFilterUpdaterRemovePod(nil, nil, nil, nil)
+
+		if preFilter1.PreFilterCalled != 1 {
+			t.Errorf("preFilter1 called %v, expected: 1", preFilter1.PreFilterCalled)
+		}
+		if preFilter2.PreFilterCalled != 1 {
+			t.Errorf("preFilter2 called %v, expected: 1", preFilter2.PreFilterCalled)
+		}
+		if preFilter2.AddCalled != 1 {
+			t.Errorf("AddPod called %v, expected: 1", preFilter2.AddCalled)
+		}
+		if preFilter2.RemoveCalled != 1 {
+			t.Errorf("AddPod called %v, expected: 1", preFilter2.RemoveCalled)
+		}
+	})
+
 }
 
 func buildConfigDefaultWeights(ps ...string) *config.Plugins {
@@ -319,25 +469,25 @@ func buildConfigWithWeights(weights map[string]int32, ps ...string) *config.Plug
 }
 
 type injectedResult struct {
-	scoreRes     int
-	normalizeRes int
-	scoreErr     bool
-	normalizeErr bool
+	ScoreRes     int  `json:"scoreRes,omitempty"`
+	NormalizeRes int  `json:"normalizeRes,omitempty"`
+	ScoreErr     bool `json:"scoreErr,omitempty"`
+	NormalizeErr bool `json:"normalizeErr,omitempty"`
 }
 
 func setScoreRes(inj injectedResult) (int, *Status) {
-	if inj.scoreErr {
+	if inj.ScoreErr {
 		return 0, NewStatus(Error, "injecting failure.")
 	}
-	return inj.scoreRes, nil
+	return inj.ScoreRes, nil
 }
 
 func injectNormalizeRes(inj injectedResult, scores NodeScoreList) *Status {
-	if inj.normalizeErr {
+	if inj.NormalizeErr {
 		return NewStatus(Error, "injecting failure.")
 	}
 	for i := range scores {
-		scores[i].Score = inj.normalizeRes
+		scores[i].Score = inj.NormalizeRes
 	}
 	return nil
 }

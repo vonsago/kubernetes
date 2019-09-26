@@ -22,11 +22,12 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/priorities"
@@ -44,7 +45,7 @@ type priorityFunc func(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.HostPriorit
 
 type priorityConfig struct {
 	function priorityFunc
-	weight   int
+	weight   int64
 }
 
 func errorPredicateExtender(pod *v1.Pod, node *v1.Node) (bool, error) {
@@ -84,7 +85,7 @@ func machine1PrioritizerExtender(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.H
 		if node.Name == "machine1" {
 			score = 10
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int64(score)})
 	}
 	return &result, nil
 }
@@ -96,7 +97,7 @@ func machine2PrioritizerExtender(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.H
 		if node.Name == "machine2" {
 			score = 10
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int64(score)})
 	}
 	return &result, nil
 }
@@ -108,7 +109,7 @@ func machine2Prioritizer(_ *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo
 		if node.Name == "machine2" {
 			score = 10
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int64(score)})
 	}
 	return result, nil
 }
@@ -116,7 +117,7 @@ func machine2Prioritizer(_ *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo
 type FakeExtender struct {
 	predicates       []fitPredicate
 	prioritizers     []priorityConfig
-	weight           int
+	weight           int64
 	nodeCacheCapable bool
 	filteredNodes    []*v1.Node
 	unInterested     bool
@@ -167,7 +168,7 @@ func (f *FakeExtender) ProcessPreemption(
 		} else {
 			// Append new victims to original victims
 			nodeToVictimsCopy[node].Pods = append(victims.Pods, extenderVictimPods...)
-			nodeToVictimsCopy[node].NumPDBViolations = victims.NumPDBViolations + extendernPDBViolations
+			nodeToVictimsCopy[node].NumPDBViolations = victims.NumPDBViolations + int64(extendernPDBViolations)
 		}
 	}
 	return nodeToVictimsCopy, nil
@@ -210,9 +211,9 @@ func (f *FakeExtender) selectVictimsOnNodeByExtender(
 	}
 	// As the first step, remove all the lower priority pods from the node and
 	// check if the given pod can be scheduled.
-	podPriority := util.GetPodPriority(pod)
+	podPriority := podutil.GetPodPriority(pod)
 	for _, p := range nodeInfoCopy.Pods() {
-		if util.GetPodPriority(p) < podPriority {
+		if podutil.GetPodPriority(p) < podPriority {
 			potentialVictims.Items = append(potentialVictims.Items, p)
 			removePod(p)
 		}
@@ -292,9 +293,9 @@ func (f *FakeExtender) Filter(pod *v1.Pod, nodes []*v1.Node, nodeNameToInfo map[
 	return filtered, failedNodesMap, nil
 }
 
-func (f *FakeExtender) Prioritize(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.HostPriorityList, int, error) {
+func (f *FakeExtender) Prioritize(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.HostPriorityList, int64, error) {
 	result := schedulerapi.HostPriorityList{}
-	combinedScores := map[string]int{}
+	combinedScores := map[string]int64{}
 	for _, prioritizer := range f.prioritizers {
 		weight := prioritizer.weight
 		if weight == 0 {
@@ -555,7 +556,7 @@ func TestGenericSchedulerWithExtenders(t *testing.T) {
 				schedulerapi.DefaultPercentageOfNodesToScore,
 				false)
 			podIgnored := &v1.Pod{}
-			result, err := scheduler.Schedule(podIgnored, framework.NewPluginContext())
+			result, err := scheduler.Schedule(framework.NewPluginContext(), podIgnored)
 			if test.expectsErr {
 				if err == nil {
 					t.Errorf("Unexpected non-error, result %+v", result)
